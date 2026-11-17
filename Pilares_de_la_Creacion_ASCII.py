@@ -1,4 +1,4 @@
-"""Pilares de la Creación en ASCII. Se anima en la terminal y sale con Ctrl+C."""
+"""Los Pilares de la Creación se forman en ASCII. Salí con Ctrl+C."""
 
 from math import sin, tau
 import os
@@ -43,6 +43,12 @@ SKY_COLORS = (17, 23, 23, 24, 30, 37, 37, 43)
 PILLAR_GLYPHS = ":;-=+*#%@"
 PILLAR_COLORS = (52, 52, 58, 94, 130, 136, 172, 214, 229)
 STAR_COLORS = (153, 189, 218, 230)
+EMBEDDED_COLORS = (203, 216, 222)
+MIST_GLYPHS = "   .,:;~"
+MIST_COLORS = (23, 24, 30, 30, 37, 73, 101, 143)
+GROWTH_GLYPHS = " .," + PILLAR_GLYPHS
+GROWTH_COLORS = (24, 30, 58) + PILLAR_COLORS
+FORMATION_SECONDS = 12.0
 
 
 def scene_size():
@@ -78,19 +84,29 @@ def prepare_scene(width, height):
     silhouette = rasterize(width, height)
     texture = []
     sky_positions = []
+    pillar_positions = []
     for y, row in enumerate(silhouette):
         for x, inside in enumerate(row):
             jitter = rng.uniform(-.06, .06)
             phase = x * .19 + y * .37 + sin(x * .14)
+            # El promedio de celdas vecinas dibuja un contorno de gas difuso.
+            nearby = [
+                flag for line in silhouette[max(0, y - 2):y + 3]
+                for flag in line[max(0, x - 4):x + 5]
+            ]
+            density = sum(nearby) / len(nearby)
+            patch = .5 + .23 * sin(x * .11 - y * .22) + .18 * sin(y * .24 + x * .04)
+            start = .29 + .26 * patch + .10 * (1 - density)
             if inside:
                 open_above = y == 0 or not silhouette[y - 1][x]
                 open_left = x == 0 or not row[x - 1]
                 border_light = .36 * open_above + .19 * open_left
                 shade = .51 + .13 * sin(x * .94 - y * .51) + border_light + jitter
+                pillar_positions.append((x, y))
             else:
                 shade = .32 + .14 * sin(x * .17 + y * .23) + .12 * sin(x * .09 - y * .49) + jitter
                 sky_positions.append((x, y))
-            texture.append((inside, shade, phase))
+            texture.append((inside, shade, phase, density, start))
 
     # Las estrellas de fondo conservan su posición y titilan a ritmos distintos.
     stars = {}
@@ -100,6 +116,9 @@ def prepare_scene(width, height):
         x, y = int(relative_x * width), int(relative_y * height)
         if not silhouette[y][x]:
             stars[x, y] = (rng.random() * tau, rng.uniform(1.4, 2.6), 230, True)
+    count = min(len(pillar_positions), max(7, width * height // 170))
+    for x, y in rng.sample(pillar_positions, count):
+        stars[x, y] = (rng.random() * tau, rng.uniform(1.6, 3.9), rng.choice(EMBEDDED_COLORS), False)
     return texture, stars
 
 
@@ -107,27 +126,50 @@ def shade_index(shade, ramp):
     return max(0, min(len(ramp) - 1, int(shade * len(ramp))))
 
 
+def smooth(value):
+    fraction = max(0.0, min(1.0, value))
+    return fraction * fraction * (3 - 2 * fraction)
+
+
 def frame(width, height, texture, stars, seconds, color):
-    """Dibuja un cuadro usando caracteres ASCII. El polvo del cielo se desplaza."""
+    """Dibuja polvo difuso, materia condensada y estrellas en el mismo cuadro."""
     lines = []
     last_color = None
+    progress = min(1.0, seconds / FORMATION_SECONDS)
+    mist_release = 1 - smooth((progress - .57) / .39)
     for y in range(height):
         row = []
         for x in range(width):
-            inside, shade, phase = texture[y * width + x]
+            inside, shade, phase, density, start = texture[y * width + x]
+            drift = .15 * sin(phase - seconds * .57)
+            sky_shade = .28 + .14 * sin(phase) if inside else shade
+            level = shade_index(sky_shade + drift, SKY_GLYPHS)
+            symbol, tint = SKY_GLYPHS[level], SKY_COLORS[level]
+
+            soft_cloud = density * mist_release * smooth((progress - .04 - .34 * (start - .29)) / .36)
+            mist_level = shade_index(soft_cloud * .94, MIST_GLYPHS)
+            if MIST_GLYPHS[mist_level] != " ":
+                symbol, tint = MIST_GLYPHS[mist_level], MIST_COLORS[mist_level]
+
+            solid = smooth((progress - start) / .30) if inside else 0.0
+            if solid:
+                target = 3 + shade_index(shade, PILLAR_GLYPHS)
+                visible = round(solid * target)
+                if visible:
+                    symbol, tint = GROWTH_GLYPHS[visible], GROWTH_COLORS[visible]
+
             star = stars.get((x, y))
             if star:
-                start, speed, tint, bright = star
-                pulse = .5 + .5 * sin(seconds * speed + start)
-                ramp = "*+X" if bright else " .*+"
-                symbol = ramp[shade_index(pulse, ramp)]
-            elif inside:
-                level = shade_index(shade, PILLAR_GLYPHS)
-                symbol, tint = PILLAR_GLYPHS[level], PILLAR_COLORS[level]
-            else:
-                drift = .15 * sin(phase - seconds * .57)
-                level = shade_index(shade + drift, SKY_GLYPHS)
-                symbol, tint = SKY_GLYPHS[level], SKY_COLORS[level]
+                star_phase, speed, star_tint, bright = star
+                pulse = .5 + .5 * sin(seconds * speed + star_phase)
+                if inside:
+                    pulse *= smooth((solid - .38) / .62)
+                    ramp = "  .*+"
+                else:
+                    ramp = "*+X" if bright else " .*+"
+                spark = ramp[shade_index(pulse, ramp)]
+                if spark != " ":
+                    symbol, tint = spark, star_tint
 
             if color and symbol != " " and tint != last_color:
                 row.append(f"\x1b[38;5;{tint}m")
@@ -166,7 +208,7 @@ def main():
     width, height = scene_size()
     texture, stars = prepare_scene(width, height)
     if restore_mode is None:
-        print(frame(width, height, texture, stars, 0, color=False))
+        print(frame(width, height, texture, stars, FORMATION_SECONDS, color=False))
         return
 
     output = sys.stdout
